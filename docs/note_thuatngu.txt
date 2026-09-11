@@ -1,0 +1,137 @@
+1. Locomotion là bài toán giúp robot tạo ra chuyển động của cơ thể để di chuyển trong môi trường.
+
+* Humanoid = robot có cơ thể và cách vận động mô phỏng con người.
+
+| Thuật ngữ      | Hiểu đơn giản                                                                   |
+| -------------- | ------------------------------------------------------------------------------- |
+| **Joint**      | Khớp chuyển động của robot, ví dụ khớp gối                                      |
+| **Link**       | Phần cứng nối giữa các khớp, ví dụ cẳng chân                                    |
+| **DOF**        | Số hướng/chuyển động độc lập mà robot có thể thực hiện                          |
+| **Actuator**   | Bộ phận tạo chuyển động, thường là motor                                        |
+| **Gait**       | Kiểu/chu kỳ bước đi của robot                                                   |
+| **Balance**    | Khả năng giữ thăng bằng, không bị ngã                                           |
+| **Contact**    | Điểm cơ thể robot đang tiếp xúc với môi trường, ví dụ bàn chân với mặt đất      |
+| **Torque**     | Lực xoắn mà motor tạo ra tại khớp                                               |
+| **Controller** | Điều khiển robot để chuyển động thực tế giống chuyển động mong muốn             |
+| **Feedback**   | Thông tin robot đo lại sau khi chuyển động để biết mình thực hiện đúng hay chưa |
+
+| Hướng                       | Ý tưởng đơn giản                                               | Thuật ngữ thường gặp                               |
+| --------------------------- | -------------------------------------------------------------- | -------------------------------------------------- |
+| **Classical / Model-based** | Dùng **mô hình toán + vật lý của robot** để tính chuyển động   | Kinematics, Dynamics, PID, ZMP                     |
+| **Optimization-based**      | Tìm chuyển động **tối ưu** thỏa các ràng buộc                  | MPC, Trajectory Optimization, Whole-Body Control   |
+| **Learning-based**          | Cho robot **học cách di chuyển** từ quá trình training/dữ liệu | Reinforcement Learning, Imitation Learning, Policy |
+| **Hybrid**                  | Kết hợp **model/optimization + learning**                      | RL + MPC/WBC, Learned Policy + Controller          |
+
+2. Các bài toán 
+| Bài toán Locomotion          | Cổ điển / Model-based                | Optimization                          | Learning-based                        |
+| ---------------------------- | ------------------------------------ | ------------------------------------- | ------------------------------------- |
+| **1. Balance / Stability**   | PID, ZMP, mô hình động lực học       | MPC, WBC                              | RL Policy học giữ thăng bằng          |
+| **2. Gait Generation**       | Gait được thiết kế trước, FSM, CPG   | Trajectory Optimization               | RL / Imitation Learning học cách bước |
+| **3. Footstep Planning**     | Luật đặt chân, search-based planning | Optimization tìm vị trí chân tốt nhất | Learned Footstep Policy               |
+| **4. Trajectory Generation** | Nội suy / trajectory thiết kế trước  | Trajectory Optimization, MPC          | Policy sinh target/trajectory         |
+| **5. Whole-Body Motion**     | Kinematics + Dynamics                | Whole-Body Control / Optimization     | Whole-Body Policy, RL                 |
+| **6. Locomotion Control**    | PID, inverse dynamics                | MPC, WBC                              | RL Policy / Hybrid Control            |
+
+Bài toán 1: Balance / Stability
+- Bài toán giúp robot giữ thăng bằng và không bị ngã kể cả khi đứng, khi đi và tác động từ bên ngoài 
+
+Ví dụ humanoid đang đứng và có người đẩy nhẹ:
+
+Robot bị đẩy
+    ↓
+Cơ thể nghiêng
+    ↓
+Phát hiện mất cân bằng
+    ↓
+Điều chỉnh chân / joint
+    ↓
+Không bị ngã
+
+- Hướng cổ điển
+
+Con người sử dụng mô hình vật lý của robot để xác định robot đang cân bằng hay sắp ngã, sau đó điều khiển các joint để sửa lại.
+Một khái niệm rất thường gặp là ZMP — Zero Moment Point, ZMP giúp đánh giá/thiết kế trạng thái cân bằng của robot chân trong một số mô hình điều khiển.
+
+Sau đó controller điều chỉnh robot.
+Sensor
+  ↓
+Trạng thái robot
+  ↓
+Model / ZMP
+  ↓
+Controller
+  ↓
+Joint
+
+
+
+Hướng Optimization
+
+Thay vì đặt ra từng luật điều khiển, ta yêu cầu hệ thống:
+
+“Tìm cách điều khiển tốt nhất để robot tiếp tục di chuyển nhưng vẫn thỏa các ràng buộc cân bằng.”
+
+Ví dụ MPC — Model Predictive Control có thể dự đoán trạng thái robot trong một khoảng thời gian tương lai và liên tục tính lại điều khiển.
+
+Current State
+      ↓
+Predict Future
+      ↓
+Optimization
+      ↓
+Best Control
+      ↓
+Robot
+      ↓
+Lặp lại
+
+MPC = nhìn trước một đoạn → chọn hành động tốt → thực hiện → tính lại.
+
+
+Hướng Learning-based
+
+Cho robot học cách phản ứng.
+
+Ví dụ với RL:
+
+Robot nghiêng
+     ↓
+Observation
+     ↓
+RL Policy
+     ↓
+Action
+     ↓
+Joint
+     ↓
+Robot lấy lại thăng bằng
+
+Trong simulation, robot trải qua rất nhiều tình huống bị lệch, bị đẩy, chuyển động... và học policy giúp nó giữ thăng bằng.
+
+Learning-based Balance = học cách phản ứng để không ngã.
+
+
+Hybrid
+
+Thực tế có thể kết hợp:
+
+RL Policy
+   ↓
+Desired Motion
+   ↓
+WBC / Controller
+   ↓
+Joint / Motor
+
+Learning xử lý một phần quyết định, trong khi controller/model-based đảm nhiệm phần điều khiển bên dưới.
+
+
+Bài toàn về balance 
+| Phần                        | Câu hỏi                                               |
+| --------------------------- | ----------------------------------------------------- |
+| **1. State Estimation**     | Robot đang nghiêng bao nhiêu, chân nào đang chạm đất? |
+| **2. Stability Evaluation** | Trạng thái hiện tại có sắp ngã không?                 |
+| **3. Balance Planning**     | Nên nghiêng người, đổi lực hay bước chân thế nào?     |
+| **4. Balance Control**      | Điều khiển joint/motor để thực hiện việc đó           |
+
+

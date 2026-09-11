@@ -1,0 +1,56 @@
+# thuật ngữ
+
+| **No**
+ | **Thuật ngữ** | **Nội dung** | **Note** |
+| --- | --- | --- | --- |
+| 1 | **Locomotion** | Locomotion là **khả năng và thuật toán giúp robot tự di chuyển trong môi trường**, đặc biệt là đi lại, giữ thăng bằng và thực hiện các chuyển động của cơ thể. | Locomotion = Robot thực hiện việc di chuyển như thế nào? |
+| 2 | **Navigation** | **Navigation** là khả năng giúp robot **xác định vị trí của mình, hiểu môi trường xung quanh và tự tìm đường đến đích**.
+Thành phần của Navigation:
+
+1. Localization: Robot xác định vị trí của chính mình. Công nghệ thường dùng: LiDAR, Camera, IMU, Wheel Encoder
+2. Mapping: Tạo bản đồ môi trường. 
+3. SLAM (Simultaneous Localization and Mapping), vừa:
+    ◦ Xây dựng bản đồ
+    ◦ Xác định vị trí robot
+Đây là công nghệ rất phổ biến trong AMR, Robot dịch, Humanoid
+4. Path Planning: Tìm đường từ điểm A đến B.
+5. Obstacle Avoidance: Tránh vật cản trong thời gian thực, Robot sẽ tự đổi hướng. | Navigation = Robot biết đi đâu và đi bằng đường nào? |
+| 3 | **Perception** | **Perception** là khả năng giúp robot **cảm nhận và hiểu môi trường xung quanh** thông qua các cảm biến.
+Nếu ví robot như con người:
+• **Sensor (camera, LiDAR, IMU)** = mắt, tai, xúc giác
+• **Perception** = não bộ xử lý những gì mắt và tai nhìn thấy
+• **Navigation** = quyết định đi đâu
+• **Locomotion** = thực hiện việc di chuyển
+Thành phần của **Perception**:
+1. Object Detection: Nhận diện đối tượng.
+2. Object Tracking: Theo dõi đối tượng theo thời gian.
+3. Semantic Segmentation: Phân loại từng điểm ảnh.
+4. Depth Estimation: Ước lượng khoảng cách.
+5. 3D Perception: Hiểu môi trường trong không gian 3D. | Perception = Robot nhìn và hiểu thế giới xung quanh. |
+| 4 | **Manipulation** | **Manipulation** là khả năng của robot dùng tay, kẹp hoặc cơ cấu chấp hành để tương tác và xử lý vật thể trong thế giới thực, tương tự cách con người dùng tay để làm việc.
+Thành phần của Manipulation:
+1. Object Detection: Xác định vật cần thao tác.
+2. Grasp Planning: Lập kế hoạch điểm gắp.
+3. Motion Planning: Lập quỹ đạo chuyển động của cánh tay.
+4. Grasping: Thực hiện động tác nắm giữ.
+5. Force Control: Điều khiển lực. | Manipulation = Robot dùng tay, kẹp hoặc cơ cấu chấp hành để cầm, nắm, di chuyển, lắp ráp hoặc sử dụng đồ vật. |
+| 5 | **SLAM** | **S**imultaneous **L**ocalization **A**nd **M**apping
+Đây là công nghệ cho phép robot:
+1. **Tự xác định vị trí của mình** trong môi trường (**Localization**).
+2. **Tạo bản đồ môi trường** khi chưa có bản đồ sẵn (**Mapping**).
+Hai việc này diễn ra **đồng thời**. **Định vị đồng thời và xây dựng bản đồ:**
+Các loại SLAM phổ biến:
+1. LiDAR SLAM
+2. Visual SLAM (V-SLAM)
+3. Visual-Inertial SLAM
+4. LiDAR-Inertial SLAM |  |
+|  | **AMR** | Autonomous Mobile Robot: Robot di động tự hành
+Đây là loại robot có khả năng tự nhận biết môi trường, tự định vị, tự lập kế hoạch đường đi và tự di chuyển mà không cần chạy theo một tuyến cố định. |  |
+|  | **AGV** | Automated Guided Vehicle, Di chuyển theo tuyến cố định |  |
+|  |  |  |  |
+|  |  |  |  |
+|  |  |  |  |
+- UV chuẩn bị slide chia sẻ trong 20 phút:
+    - các dự án mà bản thân thấy tự hào (cá nhân đóng góp nhiều nhất) kèm video minh họa (simulation + real demo)
+    - nêu rõ các kỹ năng về kỹ thuật mà cá nhân tự tin, thông thạo mà UV có thể đảm nhận xử lý
+    - chuẩn bị môi trường để chạy các bài kiểm tra code python
