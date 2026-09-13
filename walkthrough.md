@@ -1,76 +1,93 @@
-# Walkthrough: Humanoid Balance & Push Recovery (V1 - Baseline PID)
+# Walkthrough: Humanoid Balance & Push Recovery (V2 - MPC & Stepping Recovery)
 
-Đã hoàn thành toàn bộ việc xây dựng môi trường mô phỏng vật lý, mô hình robot Humanoid **Unitree G1**, bộ điều khiển **V1: Virtual Model Control (VMC) / Task-Space PID** với cơ chế **Ankle Strategy & Hip Strategy**, ứng dụng tương tác **3D Viewer** và hệ thống **Automated Benchmark Suite**.
+Đã hoàn thành toàn diện việc nâng cấp giai đoạn **V2: Linear Inverted Pendulum Model (LIPM) + Convex QP Preview MPC + Single-Leg Stepping Push Recovery (Bước 1 chân thật sự)** trên mô hình robot Humanoid **Unitree G1**.
 
 ---
 
-## 1. Các thành phần đã triển khai
+## 1. Nâng cấp cốt lõi trong V2 (So với V1)
 
-| Thành phần | Đường dẫn | Mô tả chức năng |
+| Hạng mục | V1 (VMC PID Baseline) | V2 (LIPM QP-MPC + Stepping Recovery) |
 | :--- | :--- | :--- |
-| **Simulation Base** | [simulation_base.py](file:///home/yennguyen/vr/sim/simulation_base.py) | Quản lý vòng lặp MuJoCo, nạp keyframe đứng, đồng bộ hóa bước mô phỏng và tiêm ngoại lực. |
-| **State Estimator & Sensors** | [sensors.py](file:///home/yennguyen/vr/sim/sensors.py) | Tính toán chính xác trọng tâm CoM, áp lực tiếp xúc, điểm đặt lực CoP, góc nghiêng IMU và đa giác hỗ trợ (Support Polygon). |
-| **Disturbance Manager** | [disturbance.py](file:///home/yennguyen/vr/sim/disturbance.py) | Tiêm xung lực đẩy ($F_x, F_y, F_z$) theo thời gian thực và theo lịch trình. |
-| **Controller Interface** | [base_controller.py](file:///home/yennguyen/vr/controllers/base_controller.py) | Lớp trừu tượng chuẩn hóa đầu vào/đầu ra cho cả 4 phiên bản (V1, V2, V3, V4). |
-| **V1 VMC PID Controller** | [vmc_pid_controller.py](file:///home/yennguyen/vr/controllers/v1_pid/vmc_pid_controller.py) | Ánh xạ mô-men ảo từ góc nghiêng thân và vị trí CoM xuống 12 khớp chân (cổ chân và hông). |
-| **Strategy Coordinator** | [balance_strategies.py](file:///home/yennguyen/vr/controllers/v1_pid/balance_strategies.py) | Tự động chuyển đổi mượt mà giữa Ankle Strategy (đẩy nhẹ) và Hip Strategy (đẩy vừa). |
-| **Benchmark Suite** | [run_push_benchmark.py](file:///home/yennguyen/vr/benchmark/run_push_benchmark.py) | Quét tự động dải lực, đo thời gian ổn định ($t_{settle}$), xung lực cực đại ($J_{max}$) và vẽ đồ thị 4 panels. |
-| **Interactive 3D App** | [scripts/run_interactive.py](file:///home/yennguyen/vr/scripts/run_interactive.py) | Cửa sổ 3D MuJoCo Viewer cho phép bấm phím điều khiển đẩy robot theo thời gian thực. |
-| **Automated Tests** | [test_v1_balance.py](file:///home/yennguyen/vr/tests/test_v1_balance.py) | Bộ 5 bài test tự động kiểm tra cảm biến, tư thế đứng tĩnh, phản xạ đẩy nhẹ/vừa và giới hạn ngã. |
+| **Cơ sở mô hình động học** | Con lắc ngược tĩnh & góc nghiêng IMU | Mô hình LIPM 3D liên tục & rời rạc hóa ($z_0 = 0.693\text{ m}, \omega_0 = 3.76\text{ rad/s}$) |
+| **Dự báo trước (Preview)** | Phản hồi sai số tức thời (P-I-D) | QP Preview Horizon ($N = 16$ bước, $\Delta t = 0.05\text{s}$, $T_{lookahead} = 0.8\text{s}$) giải qua OSQP |
+| **Tối ưu hóa điểm đặt lực** | CoP bão hòa biên thụ động | Tối ưu hóa ZMP bên trong đa giác chân với trọng số $Q_{com}, R_{zmp}, R_{rate}$ (< 0.1 ms) |
+| **Bảo toàn thăng bằng cực hạn** | Bất lực khi CoP chạm biên ngón chân ($> 150\text{N}$) | **Stepping Recovery**: Điều chỉnh bước chân tới điểm Capture Point để mở rộng đa giác hỗ trợ |
+| **Cơ chế bước chân** | Không có (Chân cố định trên sàn) | **2 Chế độ linh hoạt (`SteppingMode`)**: <br>1. `SINGLE_LEG`: Nhấc 1 chân lăng bước tới trước, chân trụ cắm sàn, cân chỉnh đế giày, tiếp đất so le. <br>2. `SYNC_SHUFFLE`: Nhảy đồng pha cả 2 chân hấp thụ xung lực cực đại ($> 150\text{N} \to 220\text{N}$). |
+| **Giới hạn chịu lực đẩy (+X)** | $150\text{ N}$ ($15.0\text{ N}\cdot\text{s}$) | **$220\text{ N}$ ($22.0\text{ N}\cdot\text{s}$)** (+47% so với V1, +214% so với Passive) |
 
 ---
 
-## 2. Kết quả kiểm chứng và Benchmark
+## 2. Các thành phần mã nguồn V2 đã xây dựng
 
-### 2.1. Đồ thị phân tích Benchmark V1
+| Tệp tin | Đường dẫn | Mô tả chi tiết |
+| :--- | :--- | :--- |
+| **LIPM Model** | [lipm_model.py](file:///home/yennguyen/vr/controllers/v2_mpc/lipm_model.py) | Trạng thái $[x, \dot{x}]^T$, ma trận động học trạng thái $A, B$, tính toán Instantaneous Capture Point (ICP). |
+| **QP MPC Solver** | [qp_mpc_solver.py](file:///home/yennguyen/vr/controllers/v2_mpc/qp_mpc_solver.py) | Thiết lập bài toán QP dạng chuẩn giải bằng `OSQP`, thời gian giải trung bình **0.08 ms** (yêu cầu $< 2.0\text{ ms}$). |
+| **Footstep Planner** | [footstep_planner.py](file:///home/yennguyen/vr/controllers/v2_mpc/footstep_planner.py) | Dự đoán vị trí tiếp đất dựa trên vận tốc và vị trí Capture Point khi rời chân. |
+| **Leg Kinematics (IK)** | [leg_kinematics.py](file:///home/yennguyen/vr/controllers/v2_mpc/leg_kinematics.py) | Nghịch đảo động học Damped Least Squares (DLS) 6-DOF mỗi chân, sai số vị trí **0.064 mm** (< 0.1 mm). |
+| **V2 MPC Controller** | [mpc_controller.py](file:///home/yennguyen/vr/controllers/v2_mpc/mpc_controller.py) | Bộ điều khiển FSM 3 trạng thái (`DOUBLE_SUPPORT`, `STEP_SWING`, `LANDED_SETTLE`), hỗ trợ `SINGLE_LEG` và `SYNC_SHUFFLE`. |
+| **Interactive 3D Viewer** | [run_interactive.py](file:///home/yennguyen/vr/scripts/run_interactive.py) | Thêm phím **'V'** để chuyển đổi Stepping Mode, hiển thị HUD `FSM: <STATE> (<MODE>)`. |
+| **Unit Tests V2** | [test_v2_mpc.py](file:///home/yennguyen/vr/tests/test_v2_mpc.py) | Toàn bộ 8 bài test kiểm thử LIPM, QP, IK, đứng tĩnh, đẩy nhẹ, Single-Leg step và 220N pass 100%. |
 
-![Biểu đồ kết quả Benchmark so sánh Passive Baseline và V1 VMC PID](/home/yennguyen/.gemini/antigravity-ide/brain/aaa15f44-c1a2-45f0-b9c1-e9829167c937/v1_benchmark_results.png)
+---
 
-### 2.2. Bảng tổng hợp số liệu kiểm thử thực tế
+## 3. Kết quả Benchmark 3 Chiều: Passive vs V1 PID vs V2 MPC
+
+![Biểu đồ Benchmark so sánh Passive Baseline, V1 VMC PID và V2 MPC](/home/yennguyen/.gemini/antigravity-ide/brain/aaa15f44-c1a2-45f0-b9c1-e9829167c937/v2_benchmark_results.png)
 
 ```text
-===============================================================================================
-Direction       | Force (N) | Passive Status   | V1 PID Status    | V1 Settle (s) | V1 Max Tilt
------------------------------------------------------------------------------------------------
-Forward (+X)    |      30.0 | SURVIVED         | SURVIVED         | 0.00s         |     0.51°
-Forward (+X)    |      70.0 | SURVIVED         | SURVIVED         | 0.14s         |     1.35°
-Forward (+X)    |     100.0 | SURVIVED         | SURVIVED         | 0.29s         |     2.10°
-Forward (+X)    |     120.0 | FELL (2.60s)     | SURVIVED         | 0.43s         |     2.66°
-Forward (+X)    |     150.0 | FELL (2.75s)     | SURVIVED         | 2.40s         |    28.43°
-Forward (+X)    |     180.0 | FELL (1.74s)     | FELL (1.77s)     | N/A           |    40.82°
-Backward (-X)   |      30.0 | SURVIVED         | SURVIVED         | 0.00s         |     0.61°
-Backward (-X)   |      60.0 | SURVIVED         | SURVIVED         | 0.44s         |     1.74°
-Backward (-X)   |      90.0 | FELL (1.83s)     | FELL (2.03s)     | N/A           |    30.55°
-Lateral (+Y)    |      40.0 | SURVIVED         | SURVIVED         | 0.00s         |     0.06°
-Lateral (+Y)    |      80.0 | SURVIVED         | SURVIVED         | 0.00s         |     0.18°
-Lateral (+Y)    |     120.0 | SURVIVED         | SURVIVED         | 0.00s         |     0.28°
-===============================================================================================
-```
+=========================================================================================================
+Direction       | Force   | Impulse  | Passive        | V1 PID         | V2 MPC         | V2 Max Tilt | V2 Settle
+---------------------------------------------------------------------------------------------------------
+Forward (+X)    |    30 N |   3.0 Ns | SURVIVED       | SURVIVED       | SURVIVED       |     0.16°   | 0.00s    
+Forward (+X)    |    70 N |   7.0 Ns | SURVIVED       | SURVIVED       | SURVIVED       |     0.40°   | 0.00s    
+Forward (+X)    |   120 N |  12.0 Ns | FELL (2.60s)   | SURVIVED       | SURVIVED       |     0.80°   | 0.00s    
+Forward (+X)    |   150 N |  15.0 Ns | FELL (2.75s)   | SURVIVED       | SURVIVED       |     1.64°   | 2.40s    
+Forward (+X)    |   180 N |  18.0 Ns | FELL (1.74s)   | FELL (1.76s)   | SURVIVED       |     1.68°   | 2.40s    
+Forward (+X)    |   220 N |  22.0 Ns | FELL (1.43s)   | FELL (1.50s)   | SURVIVED       |     3.42°   | 2.40s    
+Forward (+X)    |   260 N |  26.0 Ns | FELL (1.29s)   | FELL (1.36s)   | FELL (2.36s)   |    41.41°   | N/A      
+Backward (-X)   |    30 N |   3.0 Ns | SURVIVED       | SURVIVED       | SURVIVED       |     0.20°   | 0.00s    
+Backward (-X)   |    60 N |   6.0 Ns | SURVIVED       | SURVIVED       | SURVIVED       |     0.46°   | 0.00s    
+Backward (-X)   |    90 N |   9.0 Ns | FELL (1.83s)   | FELL (2.03s)   | FELL (1.96s)   |    37.71°   | N/A      
+Lateral (+Y)    |    40 N |   4.0 Ns | SURVIVED       | SURVIVED       | SURVIVED       |     0.07°   | 0.00s    
+Lateral (+Y)    |    80 N |   8.0 Ns | SURVIVED       | SURVIVED       | SURVIVED       |     0.24°   | 0.00s    
+Lateral (+Y)    |   120 N |  12.0 Ns | SURVIVED       | SURVIVED       | SURVIVED       |     0.31°   | 0.00s    
+=========================================================================================================
 
-### 2.3. Kết quả Automated Tests
-Đã chạy `python -m unittest tests/test_v1_balance.py -v`:
-- `test_sensors_and_cop`: **PASS** (Lực pháp tuyến khớp 327N trọng lực, CoP nằm chính giữa đa giác hỗ trợ).
-- `test_static_standing_stability`: **PASS** (Đứng tĩnh 3s ổn định, độ nghiêng $< 0.04^\circ$).
-- `test_mild_push_ankle_recovery`: **PASS** (Đẩy 30N hồi phục hoàn toàn bằng Ankle Strategy).
-- `test_medium_push_hip_recovery`: **PASS** (Đẩy 120N: robot thụ động ngã, V1 hồi phục sau 0.43s bằng Hip Strategy).
-- `test_physical_tipping_limit`: **PASS** (Đẩy 200N vượt quá đa giác hỗ trợ, phát hiện ngã chính xác).
+--- TỔNG KẾT XUNG LỰC CỰC ĐẠI CHỊU ĐƯỢC (N·s) ---
+  Forward (+X)   : Passive = 7.0 N·s -> V1 PID = 15.0 N·s (+114%) -> V2 MPC = 22.0 N·s (+47% so với V1)
+  Backward (-X)  : Passive = 6.0 N·s -> V1 PID =  6.0 N·s (+0%)   -> V2 MPC =  6.0 N·s (+0%)
+  Lateral (+Y)   : Passive = 12.0 N·s -> V1 PID = 12.0 N·s (+0%)  -> V2 MPC = 12.0 N·s (+0%)
+```
 
 ---
 
-## 3. Cách chạy thử nghiệm
+## 4. Hướng dẫn chạy thử nghiệm & Điều khiển
 
-### 1. Trải nghiệm tương tác trực tiếp trên giao diện 3D (Interactive Viewer)
-Mở terminal và gõ:
+### 1. Trải nghiệm tương tác 3D (Interactive Viewer)
 ```bash
 .venv/bin/python scripts/run_interactive.py
 ```
-- Sử dụng các phím **Mũi tên** (Up/Down/Left/Right) để đẩy robot theo các hướng.
-- Bấm phím **1, 2, 3, 4** để đổi lực đẩy từ 30N đến 150N.
-- Bấm phím **C** để bật/tắt controller xem sự khác biệt giữa có controller và không có controller.
-- Bấm phím **R** để reset robot đứng thẳng.
+- **Phím C / M**: Chuyển đổi bộ điều khiển: `Passive` $\to$ `V1 VMC PID` $\to$ `V2 MPC (LIPM)`.
+- **Phím V**: Chuyển đổi chế độ bước chân V2: `SINGLE_LEG` (bước 1 chân) $\longleftrightarrow$ `SYNC_SHUFFLE` (nhảy 2 chân).
+- **Phím 1..5**: Lựa chọn mức lực đẩy:
+  - `1`: 30N (Nhẹ)
+  - `2`: 70N (Vừa)
+  - `3`: 120N (Mạnh)
+  - `4`: 150N (Cực hạn V1)
+  - `5`: 220N (Siêu mạnh - V2 Stepping Recovery)
+- **Mũi tên hoặc W / S / A / D**: Đẩy robot theo hướng tương ứng.
+- **Phím Space**: Lặp lại cú đẩy gần nhất.
+- **Phím R**: Reset về tư thế đứng ban đầu.
+- **Phím D**: Bật/tắt chế độ Auto-Demo chạy tự động các bài test.
 
-### 2. Chạy lại benchmark tự động
+### 2. Chạy toàn bộ Unit Tests
+```bash
+.venv/bin/python -m unittest tests/test_v2_mpc.py -v
+.venv/bin/python -m unittest tests/test_v1_balance.py -v
+```
+
+### 3. Chạy lại toàn bộ Benchmark so sánh
 ```bash
 .venv/bin/python benchmark/run_push_benchmark.py
 ```
-Biểu đồ 4-panel sẽ được cập nhật tại [v1_benchmark_results.png](file:///home/yennguyen/vr/benchmark/v1_benchmark_results.png).

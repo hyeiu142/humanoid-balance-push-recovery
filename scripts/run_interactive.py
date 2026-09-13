@@ -34,7 +34,7 @@ import mujoco.viewer
 
 from sim.simulation_base import SimulationBase
 from controllers.v1_pid.vmc_pid_controller import VMCPIDController
-from controllers.v2_mpc.mpc_controller import V2MPCController
+from controllers.v2_mpc.mpc_controller import V2MPCController, SteppingMode, RecoveryState
 
 
 class InteractiveViewerApp:
@@ -46,9 +46,10 @@ class InteractiveViewerApp:
         print("   - Khi cửa sổ 3D hiện lên, AUTO-DEMO sẽ tự động kích hoạt sau 2.5 giây.")
         print("     Robot sẽ tự động trải nghiệm các lực đẩy từ 30N đến 220N.")
         print("   - CLICK CHUỘT VÀO CỬA SỔ 3D rồi bấm các phím:")
-        print("     * Phím M hoặc C: Chuyển đổi bộ điều khiển (V2 MPC <-> Passive <-> V1 PID)")
-        print("     * Phím MŨI TÊN (Lên/Xuống/Trái/Phải): Tác động lực đẩy thủ công")
-        print("     * Phím 1..5: Đổi lực đẩy (1: 30N | 2: 70N | 3: 120N | 4: 150N | 5: 220N)")
+        print("     * Phím B: THỰC HIỆN BƯỚC 1 CHÂN NGAY LẬP TỨC (Single-Leg Step)")
+        print("     * Phím V: Đổi chế độ bước V2 (Single-Leg Step <-> Sync Shuffle)")
+        print("     * Phím W / MŨI TÊN LÊN: Tác động lực đẩy tới trước")
+        print("     * Phím 1..5: Đổi lực đẩy (1: 30N | 2: 85N | 3: 120N | 4: 150N | 5: 220N)")
         print("     * Phím D: Bật / Tắt chế độ Auto-Demo")
         print("     * Phím R: Reset robot về tư thế đứng ban đầu")
         print("     * Phím Spacebar: Đẩy lại cú đẩy gần nhất")
@@ -111,17 +112,17 @@ class InteractiveViewerApp:
             ctrl.reset()
 
     def key_callback(self, keycode: int):
-        # Arrow Keys
-        if keycode == self.GLFW_KEY_UP:
+        # Arrow Keys & WASD
+        if keycode in (self.GLFW_KEY_UP, ord("W"), ord("w")):
             self.auto_demo = False
             self.trigger_push("Forward (+X)", [self.push_force_mag, 0.0, 0.0])
-        elif keycode == self.GLFW_KEY_DOWN:
+        elif keycode in (self.GLFW_KEY_DOWN, ord("S"), ord("s")):
             self.auto_demo = False
             self.trigger_push("Backward (-X)", [-self.push_force_mag, 0.0, 0.0])
-        elif keycode == self.GLFW_KEY_LEFT:
+        elif keycode in (self.GLFW_KEY_LEFT, ord("A"), ord("a")):
             self.auto_demo = False
             self.trigger_push("Lateral Left (+Y)", [0.0, self.push_force_mag, 0.0])
-        elif keycode == self.GLFW_KEY_RIGHT:
+        elif keycode in (self.GLFW_KEY_RIGHT, ord("E"), ord("e")):
             self.auto_demo = False
             self.trigger_push("Lateral Right (-Y)", [0.0, -self.push_force_mag, 0.0])
         elif keycode == self.GLFW_KEY_SPACE:
@@ -133,8 +134,8 @@ class InteractiveViewerApp:
             self.push_force_mag = 30.0
             print(f">> Chọn mức lực 1 (Nhẹ: {self.push_force_mag:.0f} N)")
         elif keycode in (ord("2"), ord("@")):
-            self.push_force_mag = 70.0
-            print(f">> Chọn mức lực 2 (Vừa: {self.push_force_mag:.0f} N)")
+            self.push_force_mag = 85.0
+            print(f">> Chọn mức lực 2 (Vừa - Kích hoạt Bước 1 chân: {self.push_force_mag:.0f} N)")
         elif keycode in (ord("3"), ord("#")):
             self.push_force_mag = 120.0
             print(f">> Chọn mức lực 3 (Mạnh: {self.push_force_mag:.0f} N)")
@@ -165,6 +166,27 @@ class InteractiveViewerApp:
         # Toggle controller: M or C
         elif keycode in (ord("M"), ord("m"), ord("C"), ord("c")):
             self.cycle_controller()
+
+        # Toggle V2 Stepping Mode: V or v
+        elif keycode in (ord("V"), ord("v")):
+            if self.v2_controller.stepping_mode == SteppingMode.SINGLE_LEG:
+                self.v2_controller.stepping_mode = SteppingMode.SYNC_SHUFFLE
+            else:
+                self.v2_controller.stepping_mode = SteppingMode.SINGLE_LEG
+            print(f">> [V2 STEPPING MODE] Chuyển sang: {self.v2_controller.stepping_mode.value}")
+
+        # Force Single-Leg Step: B or b
+        elif keycode in (ord("B"), ord("b")):
+            self.auto_demo = False
+            self.current_ctrl_idx = 2
+            self.v2_controller.fsm_state = RecoveryState.STEP_SWING
+            self.v2_controller.step_start_t = self.sim.data.time
+            self.v2_controller.step_count += 1
+            self.v2_controller._active_swing_mode = SteppingMode.SINGLE_LEG
+            self.v2_controller.cur_step_len = 0.09
+            self.v2_controller.swing_leg = "right"
+            self.trigger_push("Forward (+X)", [85.0, 0.0, 0.0], label="BƯỚC 1 CHÂN (SINGLE-LEG STEP)")
+            print(">> [BƯỚC 1 CHÂN] Chân phải nhấc lên vung tới trước đón đà!")
 
     def run(self):
         state = self.sim.reset()
@@ -216,7 +238,7 @@ class InteractiveViewerApp:
                     ctrl_name = self.ctrl_modes[self.current_ctrl_idx]
                     
                     if self.current_ctrl_idx == 2:
-                        sub_mode = self.v2_controller.fsm_state.name
+                        sub_mode = f"{self.v2_controller.fsm_state.name} ({self.v2_controller.stepping_mode.name})"
                     elif self.current_ctrl_idx == 1:
                         sub_mode = self.v1_controller.coordinator.current_mode.value
                     else:
@@ -227,7 +249,7 @@ class InteractiveViewerApp:
                     icp_x = state.com_pos[0] + state.com_vel[0] / self.v2_controller.lipm.omega_0
 
                     sys.stdout.write(
-                        f"\r[{ctrl_name:16s}] {stat_str:12s} | FSM: {sub_mode:14s} | Nghiêng: {tilt_deg:4.1f}° | ICP_x: {icp_x:+.2f}m | Pelvis Z: {state.pelvis_pos[2]:.2f}m | {demo_str}"
+                        f"\r[{ctrl_name:16s}] {stat_str:12s} | FSM: {sub_mode:25s} | Nghiêng: {tilt_deg:4.1f}° | ICP_x: {icp_x:+.2f}m | Pelvis Z: {state.pelvis_pos[2]:.2f}m | {demo_str}"
                     )
                     sys.stdout.flush()
 

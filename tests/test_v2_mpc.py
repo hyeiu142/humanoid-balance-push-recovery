@@ -23,7 +23,7 @@ from sim.simulation_base import SimulationBase
 from controllers.v2_mpc.lipm_model import LIPMModel
 from controllers.v2_mpc.qp_mpc_solver import LIPMQPSolver
 from controllers.v2_mpc.leg_kinematics import LegKinematicsSolver
-from controllers.v2_mpc.mpc_controller import V2MPCController, RecoveryState
+from controllers.v2_mpc.mpc_controller import V2MPCController, RecoveryState, SteppingMode
 
 
 class TestV2MPC(unittest.TestCase):
@@ -127,16 +127,17 @@ class TestV2MPC(unittest.TestCase):
             self.assertLess(tilt_deg, 0.6, f"Final tilt should be < 0.6 deg after {push_f}N push")
 
     def test_heavy_push_stepping_recovery_220n(self):
-        """Verify robot recovers from 220N push (where V1 and Passive fail) using Stepping Recovery."""
+        """Verify robot recovers from 220N push (where V1 and Passive fail) using Sync Shuffle Stepping Recovery."""
         state = self.sim.reset()
         self.controller.reset()
+        self.controller.stepping_mode = SteppingMode.SYNC_SHUFFLE
         self.sim.schedule_push([220.0, 0, 0], duration=0.1, start_time=0.5)
 
         stepped = False
         for step in range(1500):
             action = self.controller.compute_action(state, self.sim.dt)
             state, _, fallen = self.sim.step(action)
-            self.assertFalse(fallen, "Robot with V2 MPC must survive 220N push!")
+            self.assertFalse(fallen, "Robot with V2 MPC must survive 220N push in Sync Shuffle mode!")
 
             if self.controller.fsm_state in (RecoveryState.STEP_SWING, RecoveryState.LANDED_SETTLE):
                 stepped = True
@@ -145,6 +146,30 @@ class TestV2MPC(unittest.TestCase):
         tilt_deg = np.linalg.norm(state.pelvis_rpy[:2]) * 180.0 / np.pi
         self.assertLess(tilt_deg, 3.5, "Torso tilt should remain < 3.5 deg after 220N recovery")
         self.assertGreater(state.pelvis_pos[2], 0.70, "Pelvis height should remain > 0.70m")
+
+    def test_single_leg_stepping_recovery(self):
+        """Verify robot recovers from 120N push using natural Single-Leg Stepping Recovery."""
+        state = self.sim.reset()
+        self.controller.reset()
+        self.controller.stepping_mode = SteppingMode.SINGLE_LEG
+        self.sim.schedule_push([120.0, 0, 0], duration=0.1, start_time=0.5)
+
+        for step in range(1500):
+            action = self.controller.compute_action(state, self.sim.dt)
+            state, _, fallen = self.sim.step(action)
+            self.assertFalse(fallen, "Robot with V2 MPC must survive 120N push in Single-Leg mode!")
+
+        tilt_deg = np.linalg.norm(state.pelvis_rpy[:2]) * 180.0 / np.pi
+        self.assertLess(tilt_deg, 1.0, "Torso tilt should remain < 1.0 deg after Single-Leg recovery")
+        self.assertGreater(state.pelvis_pos[2], 0.75, "Pelvis height should remain > 0.75m")
+
+    def test_stepping_mode_toggle(self):
+        """Verify SteppingMode enum and controller mode toggle."""
+        self.assertEqual(self.controller.stepping_mode, SteppingMode.SINGLE_LEG)
+        self.controller.stepping_mode = SteppingMode.SYNC_SHUFFLE
+        self.assertEqual(self.controller.stepping_mode, SteppingMode.SYNC_SHUFFLE)
+        self.controller.stepping_mode = SteppingMode.SINGLE_LEG
+        self.assertEqual(self.controller.stepping_mode, SteppingMode.SINGLE_LEG)
 
 
 if __name__ == "__main__":
