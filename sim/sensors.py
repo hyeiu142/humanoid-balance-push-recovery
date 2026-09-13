@@ -97,6 +97,11 @@ class StateEstimator:
         self._prev_com = None
         self._prev_time = None
 
+    def reset(self):
+        """Reset state estimator internal caches."""
+        self._prev_com = None
+        self._prev_time = None
+
     def update(self, data: mujoco.MjData) -> RobotState:
         """
         Compute and return current RobotState from MjData.

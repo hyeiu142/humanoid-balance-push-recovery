@@ -57,6 +57,7 @@ class SimulationBase:
         """
         mujoco.mj_resetDataKeyframe(self.model, self.data, keyframe_id)
         self.disturbance_mgr.clear()
+        self.estimator.reset()
 
         # Set default control targets to match initial posture
         for i in range(self.model.nu):
