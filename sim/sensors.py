@@ -21,6 +21,8 @@ class RobotState:
     pelvis_rpy: np.ndarray       # [roll, pitch, yaw] in radians
     pelvis_lin_vel: np.ndarray   # [vx, vy, vz] in world frame
     pelvis_ang_vel: np.ndarray   # [wx, wy, wz] (gyro) in base/world frame
+    left_foot_pos: np.ndarray    # [x, y, z] in world frame
+    right_foot_pos: np.ndarray   # [x, y, z] in world frame
     # Actuator states
     joint_pos: np.ndarray        # (nu,) actuator positions
     joint_vel: np.ndarray        # (nu,) actuator velocities
@@ -128,7 +130,11 @@ class StateEstimator:
         self._prev_com = com_pos.copy()
         self._prev_time = time
 
-        # 3. Joint angles and velocities for actuators
+        # 3. Foot positions
+        left_foot_pos = data.xpos[self.left_foot_body_id].copy()
+        right_foot_pos = data.xpos[self.right_foot_body_id].copy()
+
+        # 4. Joint angles and velocities for actuators
         nu = self.model.nu
         joint_pos = np.zeros(nu)
         joint_vel = np.zeros(nu)
@@ -139,7 +145,7 @@ class StateEstimator:
             joint_pos[i] = data.qpos[qpos_adr]
             joint_vel[i] = data.qvel[qvel_adr]
 
-        # 4. Foot contacts and Center of Pressure (CoP)
+        # 5. Foot contacts and Center of Pressure (CoP)
         left_contact = False
         right_contact = False
         total_fz = 0.0
@@ -170,7 +176,7 @@ class StateEstimator:
             # If in air or no contact, default CoP to ground projection of CoM
             cop = np.array([com_pos[0], com_pos[1]])
 
-        # 5. Stability Margin (distance to foot support boundaries)
+        # 6. Stability Margin (distance to foot support boundaries)
         # Margin is positive inside polygon, negative outside
         dist_x_min = cop[0] - self.foot_x_min
         dist_x_max = self.foot_x_max - cop[0]
@@ -178,7 +184,7 @@ class StateEstimator:
         dist_y_max = self.foot_y_max - cop[1]
         cop_margin = min(dist_x_min, dist_x_max, dist_y_min, dist_y_max)
 
-        # 6. Fall Detection
+        # 7. Fall Detection
         is_fallen = bool(
             pelvis_pos[2] < 0.45 or
             abs(pelvis_rpy[0]) > 0.8 or  # > 45 deg roll
@@ -194,6 +200,8 @@ class StateEstimator:
             pelvis_rpy=pelvis_rpy,
             pelvis_lin_vel=pelvis_lin_vel,
             pelvis_ang_vel=pelvis_ang_vel,
+            left_foot_pos=left_foot_pos,
+            right_foot_pos=right_foot_pos,
             joint_pos=joint_pos,
             joint_vel=joint_vel,
             left_foot_contact=left_contact,

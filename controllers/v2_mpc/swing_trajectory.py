@@ -21,6 +21,7 @@ class SwingTrajectoryGenerator:
         p_target: np.ndarray,
         time_elapsed: float,
         step_duration: float,
+        midpoint_offset: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Evaluate swing foot position and velocity at time_elapsed in [0, step_duration].
@@ -37,8 +38,23 @@ class SwingTrajectoryGenerator:
         s = 0.5 * (1.0 - np.cos(np.pi * tau))
         s_dot = 0.5 * (np.pi / step_duration) * np.sin(np.pi * tau)
 
-        pos_xy = p_start[:2] + s * (p_target[:2] - p_start[:2])
-        vel_xy = s_dot * (p_target[:2] - p_start[:2])
+        midpoint = (
+            np.zeros(3, dtype=np.float64)
+            if midpoint_offset is None
+            else np.asarray(midpoint_offset, dtype=np.float64)
+        )
+        midpoint_s = np.sin(np.pi * tau)
+        midpoint_s_dot = (np.pi / step_duration) * np.cos(np.pi * tau)
+
+        pos_xy = (
+            p_start[:2]
+            + s * (p_target[:2] - p_start[:2])
+            + midpoint_s * midpoint[:2]
+        )
+        vel_xy = (
+            s_dot * (p_target[:2] - p_start[:2])
+            + midpoint_s_dot * midpoint[:2]
+        )
 
         # Vertical Z trajectory: bell curve with apex at tau = 0.5
         # z(tau) = z_start + (z_target - z_start) * s + step_height * sin(pi * tau)

@@ -1,121 +1,135 @@
 """
-Footstep Planner & Capture Point FSM for Stepping Push Recovery.
-Evaluates Instantaneous Capture Point (ICP) and triggers stabilizing recovery steps.
-Computes relative footstep target displacements Delta_x, Delta_y.
+Footstep decision policy for push recovery.
+
+This module owns the decision to step, the active stepping mode, the swing
+leg, and the planned step length. It deliberately does not own execution
+state or joint commands; those remain in the controller and IK adapter.
 """
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+
 import numpy as np
 
 from controllers.v2_mpc.lipm_model import LIPMModel
 
 
-class SteppingState(Enum):
-    DOUBLE_SUPPORT = "Double Support"
-    STEPPING_LEFT = "Stepping Left Foot"
-    STEPPING_RIGHT = "Stepping Right Foot"
-    RESTORE_SETTLE = "Restore Settle"
+class SteppingMode(Enum):
+    SINGLE_LEG = "Single-Leg Stepping"
+    SYNC_SHUFFLE = "Synchronous Shuffle"
+
+
+@dataclass(frozen=True)
+class StepPlan:
+    """Immutable plan for one recovery step."""
+
+    mode: SteppingMode
+    swing_leg: str
+    step_length: float
+    duration: float
+    icp_x: float
 
 
 class FootstepPlanner:
-    """
-    Evaluates Capture Point and coordinates reactive stabilizing recovery steps.
-    """
+    """Choose whether and how the controller should take a recovery step."""
 
     def __init__(
         self,
         lipm: LIPMModel,
-        step_duration: float = 0.22,   # 220 ms fast stabilizing step
-        step_height: float = 0.05,     # 5 cm foot clearance
-        step_trigger_icp: float = 0.08, # ICP > 8 cm triggers step
+        step_duration: float = 0.18,
+        single_leg_duration: float = 0.16,
+        step_trigger_icp: float = 0.11,
+        step_trigger_velocity: float = 0.28,
+        single_leg_acceleration_limit: float = 5.5,
     ):
         self.lipm = lipm
-        self.step_duration = step_duration
-        self.step_height = step_height
-        self.step_trigger_icp = step_trigger_icp
+        self.step_duration = float(step_duration)
+        self.single_leg_duration = float(single_leg_duration)
+        self.step_trigger_icp = float(step_trigger_icp)
+        self.step_trigger_velocity = float(step_trigger_velocity)
+        self.single_leg_acceleration_limit = float(single_leg_acceleration_limit)
 
-        self.state = SteppingState.DOUBLE_SUPPORT
-        self.step_start_time = 0.0
-        self.step_length_x = 0.0
-        self.step_offset_y = 0.0
+    def reset(self) -> None:
+        """Keep a reset hook for controller lifecycle symmetry."""
 
-        # Permanent landed offsets
-        self.landed_offset_left = np.zeros(3)
-        self.landed_offset_right = np.zeros(3)
-
-    def reset(self):
-        self.state = SteppingState.DOUBLE_SUPPORT
-        self.step_start_time = 0.0
-        self.step_length_x = 0.0
-        self.step_offset_y = 0.0
-        self.landed_offset_left.fill(0.0)
-        self.landed_offset_right.fill(0.0)
-
-    def is_stepping(self) -> bool:
-        return self.state in (SteppingState.STEPPING_LEFT, SteppingState.STEPPING_RIGHT)
-
-    def update(
+    def plan(
         self,
+        *,
         current_time: float,
-        com_pos: np.ndarray,
-        com_vel: np.ndarray,
-    ) -> tuple[SteppingState, Optional[str], float, float]:
-        """
-        Update stepping FSM.
-        Returns:
-            (current_state, swing_foot_name, cur_step_dx, cur_step_dz)
-            where cur_step_dx is the relative forward/backward swing displacement,
-            and cur_step_dz is the vertical lift height.
-        """
-        icp_x = com_pos[0] + com_vel[0] / self.lipm.omega_0
+        com_pos_x: float,
+        com_vel_x: float,
+        com_acc_x: float,
+        pelvis_roll: float,
+        total_offset: float,
+        stepping_mode: SteppingMode,
+    ) -> Optional[StepPlan]:
+        """Return a recovery plan, or None when in-place balance is enough."""
+        if current_time < 0.10:
+            return None
 
-        # 1. During active swing:
-        if self.is_stepping():
-            elapsed = current_time - self.step_start_time
-            tau = np.clip(elapsed / self.step_duration, 0.0, 1.0)
-            swing_name = "left" if self.state == SteppingState.STEPPING_LEFT else "right"
+        icp_x = float(com_pos_x + com_vel_x / self.lipm.omega_0)
+        trigger = (
+            com_vel_x > self.step_trigger_velocity
+            or icp_x > total_offset + self.step_trigger_icp
+        )
+        if not trigger:
+            return None
 
-            # Smooth horizontal displacement s(tau) * step_length
-            s = 0.5 * (1.0 - np.cos(np.pi * tau))
-            cur_dx = s * self.step_length_x
+        predicted_touchdown = icp_x * np.exp(self.lipm.omega_0 * self.step_duration)
 
-            # Vertical lift clearance
-            cur_dz = self.step_height * np.sin(np.pi * tau)
+        if (
+            stepping_mode == SteppingMode.SINGLE_LEG
+            and com_acc_x < self.single_leg_acceleration_limit
+        ):
+            return StepPlan(
+                mode=SteppingMode.SINGLE_LEG,
+                swing_leg="left" if pelvis_roll > 0.03 else "right",
+                step_length=0.09,
+                duration=self.single_leg_duration,
+                icp_x=icp_x,
+            )
 
-            # Check Touchdown
-            if elapsed >= self.step_duration:
-                if swing_name == "left":
-                    self.landed_offset_left[0] = self.step_length_x
-                else:
-                    self.landed_offset_right[0] = self.step_length_x
+        return StepPlan(
+            mode=SteppingMode.SYNC_SHUFFLE,
+            swing_leg="both",
+            step_length=float(np.clip(predicted_touchdown - total_offset, 0.16, 0.26)),
+            duration=self.step_duration,
+            icp_x=icp_x,
+        )
 
-                self.state = SteppingState.RESTORE_SETTLE
-                return self.state, swing_name, self.step_length_x, 0.0
+    def plan_secondary_shuffle(
+        self,
+        *,
+        icp_x: float,
+        foot_center_x: float,
+        current_time: float,
+        last_step_start_time: float,
+        step_count: int,
+        max_steps: int,
+    ) -> Optional[StepPlan]:
+        """Plan another shuffle when ICP escapes support after landing."""
+        settled_long_enough = (
+            current_time - (last_step_start_time + self.step_duration) > 0.12
+        )
+        if (
+            icp_x <= foot_center_x + 0.14
+            or step_count >= max_steps
+            or not settled_long_enough
+        ):
+            return None
 
-            return self.state, swing_name, cur_dx, cur_dz
-
-        # 2. In Settle phase:
-        if self.state == SteppingState.RESTORE_SETTLE:
-            return self.state, None, 0.0, 0.0
-
-        # 3. Double Support: check if ICP exceeds stability threshold
-        trigger_fwd = (icp_x > self.step_trigger_icp) or (com_vel[0] > 0.22)
-        trigger_bwd = (icp_x < -0.06) or (com_vel[0] < -0.22)
-
-        if trigger_fwd or trigger_bwd:
-            # Trigger Step!
-            # Swing left if vy >= 0, else right
-            swing_name = "left" if com_vel[1] >= 0 else "right"
-            self.state = SteppingState.STEPPING_LEFT if swing_name == "left" else SteppingState.STEPPING_RIGHT
-            self.step_start_time = current_time
-
-            if trigger_fwd:
-                # Dynamic step length proportional to forward velocity
-                self.step_length_x = float(np.clip(0.16 + 0.50 * max(0.0, com_vel[0]), 0.16, 0.36))
-            else:
-                self.step_length_x = float(np.clip(-0.12 + 0.40 * min(0.0, com_vel[0]), -0.25, -0.12))
-
-            return self.state, swing_name, 0.0, 0.0
-
-        return self.state, None, 0.0, 0.0
+        rel_icp = max(0.0, icp_x - foot_center_x)
+        return StepPlan(
+            mode=SteppingMode.SYNC_SHUFFLE,
+            swing_leg="both",
+            step_length=float(
+                np.clip(
+                    rel_icp * np.exp(self.lipm.omega_0 * self.step_duration),
+                    0.10,
+                    0.18,
+                )
+            ),
+            duration=self.step_duration,
+            icp_x=icp_x,
+        )

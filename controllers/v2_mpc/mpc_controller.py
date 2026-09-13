@@ -5,7 +5,6 @@ and Low-Level Inverse Kinematics Tracking.
 """
 
 from enum import Enum
-from typing import Optional, Tuple
 import numpy as np
 import mujoco
 
@@ -14,11 +13,8 @@ from controllers.base_controller import BaseController
 from controllers.v2_mpc.lipm_model import LIPMModel
 from controllers.v2_mpc.qp_mpc_solver import LIPMQPSolver
 from controllers.v2_mpc.leg_kinematics import LegKinematicsSolver
-
-
-class SteppingMode(Enum):
-    SINGLE_LEG = "Single-Leg Stepping"
-    SYNC_SHUFFLE = "Synchronous Shuffle"
+from controllers.v2_mpc.footstep_planner import FootstepPlanner, StepPlan, SteppingMode
+from controllers.v2_mpc.swing_trajectory import SwingTrajectoryGenerator
 
 
 class RecoveryState(Enum):
@@ -70,6 +66,13 @@ class V2MPCController(BaseController):
         )
 
         self.ik_solver = LegKinematicsSolver(model)
+        self.footstep_planner = FootstepPlanner(
+            lipm=self.lipm,
+            step_duration=step_duration,
+            single_leg_duration=0.16,
+        )
+        self.single_leg_trajectory = SwingTrajectoryGenerator(step_height=0.022)
+        self.shuffle_trajectory = SwingTrajectoryGenerator(step_height=0.030)
         self.step_duration = step_duration
 
         # Nominal relative foot vectors in pelvis frame
@@ -96,6 +99,7 @@ class V2MPCController(BaseController):
         # FSM and tracking states
         self.fsm_state = RecoveryState.DOUBLE_SUPPORT
         self.step_start_t = 0.0
+        self.settle_start_t = 0.0
         self.total_offset = 0.0
         self.cur_step_len = 0.20
         self.step_count = 0
@@ -105,6 +109,7 @@ class V2MPCController(BaseController):
         self.roll_int = 0.0
         self._active_swing_mode = self.stepping_mode
         self.single_leg_duration = 0.16
+        self.active_step_duration = step_duration
         self.prev_vx = 0.0
         self.com_ax = 0.0
 
@@ -117,6 +122,7 @@ class V2MPCController(BaseController):
         """Reset internal controller states."""
         self.fsm_state = RecoveryState.DOUBLE_SUPPORT
         self.step_start_t = 0.0
+        self.settle_start_t = 0.0
         self.total_offset = 0.0
         self.cur_step_len = 0.20
         self.step_count = 0
@@ -127,9 +133,37 @@ class V2MPCController(BaseController):
         self.prev_vx = 0.0
         self.com_ax = 0.0
         self._active_swing_mode = self.stepping_mode
+        self.active_step_duration = self.step_duration
         self.staggered_baseline = self.nominal_qpos.copy()
+        self.footstep_planner.reset()
         self.qp_x.reset()
         self.qp_y.reset()
+
+    def _start_step(self, plan: StepPlan, current_time: float) -> None:
+        """Commit one planner decision to the execution FSM."""
+        self.fsm_state = RecoveryState.STEP_SWING
+        self.step_start_t = current_time
+        self.step_count += 1
+        self._active_swing_mode = plan.mode
+        self.active_step_duration = plan.duration
+        self.cur_step_len = plan.step_length
+        self.swing_leg = plan.swing_leg
+
+    def _landing_confirmed(self, state: RobotState, elapsed: float, duration: float) -> bool:
+        """Use contact when available, with a bounded timeout fallback."""
+        if elapsed < duration:
+            return False
+
+        if self._active_swing_mode == SteppingMode.SINGLE_LEG:
+            contact = (
+                state.left_foot_contact
+                if self.swing_leg == "left"
+                else state.right_foot_contact
+            )
+        else:
+            contact = state.left_foot_contact and state.right_foot_contact
+
+        return contact or elapsed >= duration + 0.05
 
     def compute_action(self, state: RobotState, dt: float) -> np.ndarray:
         """
@@ -172,30 +206,22 @@ class V2MPCController(BaseController):
             action[self.idx_left_hip_pitch] += np.clip(1.2 * u_pitch, -0.40, 0.40)
             action[self.idx_right_hip_pitch] += np.clip(1.2 * u_pitch, -0.40, 0.40)
 
-            # Check if push triggers Stepping Recovery
-            trigger = (state.com_vel[0] > 0.28 or icp_x > self.total_offset + 0.11) and current_time >= 0.10
-
-            if trigger:
-                self.fsm_state = RecoveryState.STEP_SWING
-                self.step_start_t = current_time
-                self.step_count += 1
-                pred_touchdown = icp_x * np.exp(self.lipm.omega_0 * self.step_duration)
-
-                if self.stepping_mode == SteppingMode.SINGLE_LEG and self.com_ax < 2.6:
-                    self._active_swing_mode = SteppingMode.SINGLE_LEG
-                    self.cur_step_len = 0.08
-                    self.swing_leg = "left" if state.pelvis_rpy[0] > 0.03 else "right"
-                else:
-                    # For extreme pushes (>150N), adaptively promote to bilateral sync shuffle
-                    self._active_swing_mode = SteppingMode.SYNC_SHUFFLE
-                    self.cur_step_len = float(np.clip(pred_touchdown - self.total_offset, 0.16, 0.26))
+            # The planner owns trigger, mode, leg selection, and step length.
+            plan = self.footstep_planner.plan(
+                current_time=current_time,
+                com_pos_x=state.com_pos[0],
+                com_vel_x=state.com_vel[0],
+                com_acc_x=self.com_ax,
+                pelvis_roll=state.pelvis_rpy[0],
+                total_offset=self.total_offset,
+                stepping_mode=self.stepping_mode,
+            )
+            if plan is not None:
+                self._start_step(plan, current_time)
 
         elif self.fsm_state == RecoveryState.STEP_SWING:
-            dur = self.single_leg_duration if self._active_swing_mode == SteppingMode.SINGLE_LEG else self.step_duration
+            dur = self.active_step_duration
             elapsed = current_time - self.step_start_t
-            tau = np.clip(elapsed / dur, 0.0, 1.0)
-            s = 0.5 * (1.0 - np.cos(np.pi * tau))
-
             # Load full joint state for Inverse Kinematics
             full_qpos = np.zeros(self.model.nq)
             full_qpos[0:3] = state.pelvis_pos
@@ -206,36 +232,61 @@ class V2MPCController(BaseController):
                 full_qpos[qpos_adr] = state.joint_pos[i]
 
             if self._active_swing_mode == SteppingMode.SINGLE_LEG:
-                cur_dx = s * self.cur_step_len
-                cur_dz = 0.012 * np.sin(np.pi * tau)
                 sign_y = 1.0 if self.swing_leg == "right" else -1.0
-                dy_shift = sign_y * 0.035 * np.sin(np.pi * tau)
+                midpoint_offset = np.array([0.0, -sign_y * 0.038, 0.0])
 
-                full_qpos[self.model.jnt_qposadr[self.model.actuator_trnid[3, 0]]] = max(0.15, full_qpos[self.model.jnt_qposadr[self.model.actuator_trnid[3, 0]]])
-                full_qpos[self.model.jnt_qposadr[self.model.actuator_trnid[9, 0]]] = max(0.15, full_qpos[self.model.jnt_qposadr[self.model.actuator_trnid[9, 0]]])
+                full_qpos[self.model.jnt_qposadr[self.model.actuator_trnid[3, 0]]] = max(
+                    0.15,
+                    full_qpos[self.model.jnt_qposadr[self.model.actuator_trnid[3, 0]]],
+                )
+                full_qpos[self.model.jnt_qposadr[self.model.actuator_trnid[9, 0]]] = max(
+                    0.15,
+                    full_qpos[self.model.jnt_qposadr[self.model.actuator_trnid[9, 0]]],
+                )
 
+                left_start = self.nom_rel_left.copy()
+                right_start = self.nom_rel_right.copy()
+                left_target = left_start.copy()
+                right_target = right_start.copy()
                 if self.swing_leg == "right":
-                    t_left = np.array([0.0, 0.1185 - dy_shift, -0.7568])
-                    t_right = np.array([cur_dx, -0.1185 - dy_shift, -0.7568 + cur_dz])
+                    right_target[0] += self.cur_step_len
                 else:
-                    t_left = np.array([cur_dx, 0.1185 - dy_shift, -0.7568 + cur_dz])
-                    t_right = np.array([0.0, -0.1185 - dy_shift, -0.7568])
+                    left_target[0] += self.cur_step_len
+
+                t_left, _ = self.single_leg_trajectory.evaluate(
+                    left_start,
+                    left_target,
+                    elapsed,
+                    dur,
+                    midpoint_offset=midpoint_offset,
+                )
+                t_right, _ = self.single_leg_trajectory.evaluate(
+                    right_start,
+                    right_target,
+                    elapsed,
+                    dur,
+                    midpoint_offset=midpoint_offset,
+                )
 
                 la = self.ik_solver.solve_ik("left", t_left, full_qpos)
                 ra = self.ik_solver.solve_ik("right", t_right, full_qpos)
 
-                # Sagittal joints
-                action[0] = la[0]
-                action[3] = la[3]
-                action[4] = -(la[0] + la[3] + state.pelvis_rpy[1])
+                # Merge the IK result with the explicit stabilization ownership.
+                action[self.idx_left_hip_pitch] = la[0]
+                action[self.idx_left_knee] = la[3]
+                action[self.idx_left_ankle_pitch] = -(
+                    la[0] + la[3] + state.pelvis_rpy[1]
+                )
 
-                action[6] = ra[0]
-                action[9] = ra[3]
-                action[10] = -(ra[0] + ra[3] + state.pelvis_rpy[1])
+                action[self.idx_right_hip_pitch] = ra[0]
+                action[self.idx_right_knee] = ra[3]
+                action[self.idx_right_ankle_pitch] = -(
+                    ra[0] + ra[3] + state.pelvis_rpy[1]
+                )
 
-                # Weight shift hip roll
-                action[1] = la[1]
-                action[7] = ra[1]
+                # Weight shift hip roll.
+                action[self.idx_left_hip_roll] = la[1]
+                action[self.idx_right_hip_roll] = ra[1]
 
                 # Torso pitch damping during flight
                 torso_damp = np.clip(0.8 * state.pelvis_rpy[1] + 0.12 * state.pelvis_ang_vel[1], -0.3, 0.3)
@@ -243,26 +294,40 @@ class V2MPCController(BaseController):
                 action[self.idx_right_hip_pitch] += torso_damp
 
                 # Check Touchdown
-                if elapsed >= dur:
+                if self._landing_confirmed(state, elapsed, dur):
                     self.fsm_state = RecoveryState.LANDED_SETTLE
+                    self.settle_start_t = current_time
                     self.total_offset += self.cur_step_len / 2.0
+                    self.roll_int = 0.0
 
             else:
                 # Synchronous Shuffle mode: both feet move together
-                cur_dx = s * self.cur_step_len
-                rem_t = max(0.0, self.step_duration - elapsed)
+                rem_t = max(0.0, self.active_step_duration - elapsed)
                 pred_now = icp_x * np.exp(self.lipm.omega_0 * rem_t)
                 desired_step = pred_now - self.total_offset
                 self.cur_step_len = float(np.clip(max(self.cur_step_len, desired_step), 0.16, 0.26))
 
-                cur_dz = 0.030 * np.sin(np.pi * tau) + 0.035 * s
+                left_start = self.nom_rel_left.copy()
+                right_start = self.nom_rel_right.copy()
+                left_target = left_start.copy()
+                right_target = right_start.copy()
+                left_target[0] += self.cur_step_len
+                right_target[0] += self.cur_step_len
+                left_target[2] += 0.035
+                right_target[2] += 0.035
 
-                t_left = self.nom_rel_left.copy()
-                t_left[0] += cur_dx
-                t_left[2] += cur_dz
-                t_right = self.nom_rel_right.copy()
-                t_right[0] += cur_dx
-                t_right[2] += cur_dz
+                t_left, _ = self.shuffle_trajectory.evaluate(
+                    left_start,
+                    left_target,
+                    elapsed,
+                    self.active_step_duration,
+                )
+                t_right, _ = self.shuffle_trajectory.evaluate(
+                    right_start,
+                    right_target,
+                    elapsed,
+                    self.active_step_duration,
+                )
 
                 left_angles = self.ik_solver.solve_ik("left", t_left, full_qpos)
                 right_angles = self.ik_solver.solve_ik("right", t_right, full_qpos)
@@ -281,31 +346,27 @@ class V2MPCController(BaseController):
                 action[self.idx_right_hip_pitch] += torso_damp
 
                 # Check Touchdown
-                if elapsed >= self.step_duration:
+                if self._landing_confirmed(state, elapsed, dur):
                     self.total_offset += self.cur_step_len
                     self.fsm_state = RecoveryState.LANDED_SETTLE
+                    self.settle_start_t = current_time
 
         elif self.fsm_state == RecoveryState.LANDED_SETTLE:
             if self._active_swing_mode == SteppingMode.SINGLE_LEG:
                 d_hip = self.cur_step_len / 0.75
                 if self.swing_leg == "right":
-                    action[6] -= 0.5 * d_hip
-                    action[10] += 0.5 * d_hip
-                    action[0] += 0.5 * d_hip
-                    action[4] -= 0.5 * d_hip
+                    action[self.idx_right_hip_pitch] -= 0.5 * d_hip
+                    action[self.idx_right_ankle_pitch] += 0.5 * d_hip
+                    action[self.idx_left_hip_pitch] += 0.5 * d_hip
+                    action[self.idx_left_ankle_pitch] -= 0.5 * d_hip
                 else:
-                    action[0] -= 0.5 * d_hip
-                    action[4] += 0.5 * d_hip
-                    action[6] += 0.5 * d_hip
-                    action[10] -= 0.5 * d_hip
+                    action[self.idx_left_hip_pitch] -= 0.5 * d_hip
+                    action[self.idx_left_ankle_pitch] += 0.5 * d_hip
+                    action[self.idx_right_hip_pitch] += 0.5 * d_hip
+                    action[self.idx_right_ankle_pitch] -= 0.5 * d_hip
 
-                action[3] += 0.05
-                action[9] += 0.05
-
-                action[self.idx_left_ankle_roll] += delta_ankle_roll
-                action[self.idx_right_ankle_roll] += delta_ankle_roll
-                action[self.idx_left_hip_roll] -= delta_hip_roll
-                action[self.idx_right_hip_roll] -= delta_hip_roll
+                action[self.idx_left_knee] += 0.05
+                action[self.idx_right_knee] += 0.05
 
                 pitch_err = state.pelvis_rpy[1]
                 pitch_rate = state.pelvis_ang_vel[1]
@@ -316,10 +377,10 @@ class V2MPCController(BaseController):
                 action[self.idx_right_hip_pitch] += np.clip(1.0 * u_pitch, -0.35, 0.35)
 
             else:
-                # Physical foot center in world frame from forward kinematics
-                lf_id = self.ik_solver.left_foot_id
-                rf_id = self.ik_solver.right_foot_id
-                foot_center_x = 0.5 * (self.ik_solver.data.xpos[lf_id][0] + self.ik_solver.data.xpos[rf_id][0])
+                # Physical foot center in world frame from the live state.
+                foot_center_x = 0.5 * (
+                    state.left_foot_pos[0] + state.right_foot_pos[0]
+                )
                 ref_x = foot_center_x + 0.003
                 zmp_min = foot_center_x - 0.05
                 zmp_max = foot_center_x + 0.11
@@ -354,13 +415,26 @@ class V2MPCController(BaseController):
                 action[self.idx_left_hip_pitch] += np.clip(1.4 * u_pitch, -0.45, 0.45)
                 action[self.idx_right_hip_pitch] += np.clip(1.4 * u_pitch, -0.45, 0.45)
 
-                # Secondary step if ICP exceeds toe bound again after settling
-                if icp_x > foot_center_x + 0.14 and self.step_count < self.max_steps and (current_time - (self.step_start_t + self.step_duration) > 0.12):
-                    self.fsm_state = RecoveryState.STEP_SWING
-                    self.step_start_t = current_time
-                    self.step_count += 1
-                    rel_icp = max(0.0, icp_x - foot_center_x)
-                    self.cur_step_len = float(np.clip(rel_icp * np.exp(self.lipm.omega_0 * self.step_duration), 0.10, 0.18))
+                # The planner also owns the secondary-step policy.
+                plan = self.footstep_planner.plan_secondary_shuffle(
+                    icp_x=icp_x,
+                    foot_center_x=foot_center_x,
+                    current_time=current_time,
+                    last_step_start_time=self.step_start_t,
+                    step_count=self.step_count,
+                    max_steps=self.max_steps,
+                )
+                if plan is not None:
+                    self._start_step(plan, current_time)
+
+            if (
+                self.fsm_state == RecoveryState.LANDED_SETTLE
+                and current_time - self.settle_start_t >= 0.25
+                and abs(state.pelvis_rpy[0]) < 0.08
+                and abs(state.pelvis_rpy[1]) < 0.08
+                and abs(state.com_vel[0]) < 0.10
+            ):
+                self.fsm_state = RecoveryState.DOUBLE_SUPPORT
 
         action = np.clip(action, self.ctrl_min, self.ctrl_max)
         return action
